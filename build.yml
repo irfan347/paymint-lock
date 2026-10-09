@@ -1,0 +1,59 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unzip the project
+        run: |
+          ZIP=$(ls *.zip | head -1)
+          echo "Using $ZIP"
+          unzip -o "$ZIP" -d _src
+          PROJ=$(dirname "$(find _src -name settings.gradle | head -1)")
+          echo "PROJ=$PROJ" >> $GITHUB_ENV
+          echo "Project dir: $PROJ"
+
+      - name: Set server URL (optional, from repo variable PAYMINT_URL)
+        if: ${{ vars.PAYMINT_URL != '' }}
+        run: sed -i "s#https://your-paymint.onrender.com#${{ vars.PAYMINT_URL }}#g" "$PROJ/app/build.gradle"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: Install SDK packages
+        run: sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+
+      - name: Build debug APK
+        run: cd "$PROJ" && gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Compute provisioning signature checksum
+        run: |
+          APK="$PROJ/app/build/outputs/apk/debug/app-debug.apk"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          HEX=$("$BT/apksigner" verify --print-certs "$APK" | awk '/SHA-256 digest:/{print $NF; exit}')
+          printf '%s' "$HEX" | xxd -r -p | openssl base64 -A | tr '+/' '-_' | tr -d '=' > signature-checksum.txt
+          echo "PROVISIONING_DEVICE_ADMIN_SIGNATURE_CHECKSUM = $(cat signature-checksum.txt)"
+        continue-on-error: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: paymint-lock-debug-apk
+          path: |
+            ${{ env.PROJ }}/app/build/outputs/apk/debug/app-debug.apk
+            signature-checksum.txt
+          if-no-files-found: error
